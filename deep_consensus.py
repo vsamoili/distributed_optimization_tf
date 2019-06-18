@@ -1,41 +1,52 @@
 '''
-Distributed Tensorflow 0.8.0 example of using data parallelism and share model parameters.
-Trains a simple sigmoid neural network on mnist for 20 epochs on three machines using one parameter server.
+Distributed Tensorflow 1.12.0 example of using data parallelism and share model parameters.
+Trains a deep convolutional neural network on MNIST for 10 epochs on n_nodes machines using one parameter server.
+The goal is to put minimum workload on the parameter server such that all computations are assigned to the workers.
+
+The distribution model is the consensus model, based on which each worker communicates only with its neighbours based
+on the topology provided as input (supported: full, ring, random), averages their computed gradients and applies the
+aggregation to its current parameter vector(s); then it proceeds to compute the next gradient and send it to its neighbors.
+
 Run like this:
-pc-01$ python example.py --job_name="ps" --task_index=0
-pc-02$ python example.py --job_name="worker" --task_index=0
-pc-03$ python example.py --job_name="worker" --task_index=1
-pc-04$ python example.py --job_name="worker" --task_index=2
+pc-01$ python deep_consensus.py --job_name="ps" --task_index=0
+pc-02$ python deep_consensus.py --job_name="worker" --task_index=0
+pc-03$ python deep_consensus.py --job_name="worker" --task_index=1
+pc-04$ python deep_consensus.py --job_name="worker" --task_index=2
+...
 '''
 
 from __future__ import print_function
 
-import tensorflow as tf
+import numpy as np
+import os
+import random as rn
 import sys
+import tensorflow as tf
 import time
+import worker
 from sklearn import datasets
 from tensorflow.examples.tutorials.mnist import input_data
-import worker
-import numpy as np
 from topology import get_graph
-import random as rn
-import os
 
+
+# Sets all possible seeds
 os.environ['PYTHONHASHSEED'] = '0'
 SEED = 5
 tf.set_random_seed(SEED)
 np.random.seed(SEED)
 rn.seed(SEED)
 
+# Throws an error if seeds are reset after graph construction
 if len(tf.get_default_graph()._nodes_by_id.keys()) > 0:
     raise RuntimeError("Seeding is not supported after building part of the graph. "
                        "Please move set_seed to the beginning of your code.")
+    
 # Read arguments from input file
 with open("input.txt", "r") as f:
     input_args = [line.split("=")[-1].rstrip("\n") for line in f]
     n_nodes, topology = input_args
     n_nodes = int(n_nodes)
-print(input_args)
+    
 # cluster specification
 parameter_servers = ["localhost:2222"]
 workers = ["localhost:{}".format(i) for i in range(2223, 2223 + n_nodes)]
@@ -43,21 +54,21 @@ cluster = tf.train.ClusterSpec({"ps": parameter_servers, "worker": workers})
 
 # Network Topology
 topology = get_graph(n_nodes, topology)
-print(topology)
-# input flags
+
+# Input flags
 tf.app.flags.DEFINE_string("job_name", "worker", "either 'ps' or 'worker'")
 tf.app.flags.DEFINE_integer("task_index", 0, "Index of task within the job")
 FLAGS = tf.app.flags.FLAGS
 
-# start a server for a specific task
+# Start a server for a specific task
 server = tf.train.Server(cluster,
                           job_name=FLAGS.job_name,
                           task_index=FLAGS.task_index)
 
-# config
+# ML model configuration
 batch_size = 100
 learning_rate = 0.005
-training_epochs = 1
+training_epochs = 10
 logs_path = "/tmp/mnist/1"
 wdevs = [i for i in range(len(workers))]
 
@@ -75,7 +86,15 @@ elif FLAGS.job_name == "worker":
     with tf.device("/job:worker/task:0/cpu:0"):
         token_queues = []
         dtypes = [tf.float32]*8
-        q_shapes = [[5, 5, 1, 32],[5, 5, 32, 64],[7 * 7 * 64, 1024],[1024, 10], [32], [64], [1024], [10]]
+        q_shapes = [[5, 5, 1, 32],
+                    [5, 5, 32, 64],
+                    [7 * 7 * 64, 1024],
+                    [1024, 10], 
+                    [32],
+                    [64],
+                    [1024],
+                    [10]]
+        
         for wdev in wdevs:
             this_wdev_queues = [tf.FIFOQueue(1,
                                  dtypes=dtypes,
@@ -223,6 +242,7 @@ elif FLAGS.job_name == "worker":
 
             with open(f0_name,"w") as f0, open(f1_name,"w") as f1, open(f2_name,"w") as f2:
                 start_time = time.time()
+                # setting an overall count for plotting the final charts
                 overall_count = 0
                 sess.run(init_enq_op)
                 for epoch in range(training_epochs):
@@ -240,8 +260,6 @@ elif FLAGS.job_name == "worker":
                                                         [train_op, cross_entropy],
                                                          feed_dict={x: batch_x, y_: batch_y})
                         count += 1
-                        if count == 1:
-                            break
                         overall_count += 1
                         elapsed_time = time.time() - begin_time
                         f0.write("{0:d}\t{1:.4f}\n".format(overall_count, cost))
