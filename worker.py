@@ -1,7 +1,6 @@
 import tensorflow as tf
 
 class Worker:
-
         def __init__(self, _id):
                 self._id = _id
         def get_vars(self, pv):
